@@ -18,12 +18,13 @@
       channelName: ['// Add your channel name filters below', ''],
       comment: ['// Add your comment filters below', ''],
       title: ['// Add your video title filters below', ''],
+        country: ['// Add your country filters below', ''],
     },
     options: {},
     uiPass: '',
   };
 
-  const textAreas = ['title', 'channelName', 'channelId', 'videoId', 'comment'];
+    const textAreas = ['title', 'channelName', 'channelId', 'videoId', 'comment', 'country'];
 
   function detectColorScheme(){
     let theme="light";

@@ -24,6 +24,7 @@ let storage = {
     channelName: [],
     comment: [],
     title: [],
+    country: [],
     vidLength: [null, null],
     javascript: "",
     percentWatchedHide: null
@@ -163,6 +164,22 @@ async function fetchRemoteBlocklist(force = false) {
   return remoteBlocklist;
 }
 
+// Record a harvested channelId->country pair into the persistent cache.
+// `data.country` is a country name string, or null meaning "checked, no
+// location" (so we stop re-harvesting that channel).
+function recordChannelCountry(data) {
+  if (!data || !data.channelId) return;
+  const prev = channelCountryMap[data.channelId];
+  const next = data.country || null;
+  // Never downgrade a known country back to null.
+  if (prev != null && next === null) return;
+  if (prev === next) return; // no change -> no recompile
+  channelCountryMap[data.channelId] = next;
+  chrome.storage.local.set({ channelCountryMap });
+  compiledStorage = utils.compileAll(storage);
+  utils.sendFiltersToAll();
+}
+
 chrome.storage.local.get(
   ['storageData', 'enabled', 'remoteBlocklist', 'channelCountryMap'], (data) => {
   if (Object.hasOwn(data, 'remoteBlocklist')) {
@@ -194,6 +211,10 @@ chrome.storage.local.get(
         case 'contextBlock': {
           storage.filterData[msg.data.type].push(...msg.data.entries);
           chrome.storage.local.set({storageData: storage});
+          break;
+        }
+        case 'channelCountry': {
+          recordChannelCountry(msg.data);
           break;
         }
       }

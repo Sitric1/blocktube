@@ -326,6 +326,24 @@
 
   $('myfile').addEventListener('change', importOptions, false);
 
+  function renderBlocklistStatus(info) {
+    const el = $('blocklist_status');
+    if (!el) return;
+    if (!info || !info.fetchedAt) {
+      el.textContent = 'Curated blocklist: never fetched';
+      return;
+    }
+    el.textContent = `Curated blocklist: ${info.channels} channels (updated `
+      + `${new Date(info.fetchedAt).toLocaleString()})`;
+  }
+
+  chrome.runtime.sendMessage({ type: 'getBlocklistInfo' }, renderBlocklistStatus);
+
+  $('update_blocklist').addEventListener('click', () => {
+    $('blocklist_status').textContent = 'Updating…';
+    chrome.runtime.sendMessage({ type: 'updateBlocklist' }, renderBlocklistStatus);
+  });
+
   $('enable_javascript').addEventListener('change', (v) => {
     if (v.target.checked) {
       $('advanced_tab').style.removeProperty("display");

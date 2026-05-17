@@ -6,38 +6,23 @@
   let compiledStorage;
   let enabled;
 
-  // Helper to get blocked countries from storage
-  function getBlockedCountries() {
-    if (!globalStorage || !globalStorage.filterData || !globalStorage.filterData.country) return [];
-    return globalStorage.filterData.country.filter(c => c && !c.startsWith('//'));
-  }
+  // Fallback country harvest from the channel-page DOM (used when the About
+  // panel data was not seen in an intercepted browse response). Reads the
+  // canonical channel ID and, if the About dialog is open, its country.
+  function harvestCountryFromDom() {
+    const canonical = document.querySelector('link[rel="canonical"]');
+    const m = canonical && canonical.href.match(/\/channel\/(UC[0-9A-Za-z_-]{22})/);
+    if (!m) return;
+    const channelId = m[1];
 
-  // Helper to extract country from channel About tab
-  function extractChannelCountry() {
-    // YouTube About tab: Location is usually in a span with text 'Location'
-    const aboutLabels = document.querySelectorAll('yt-formatted-string');
-    for (let label of aboutLabels) {
-      if (label.textContent.trim() === 'Location') {
-        // Next sibling is the country value
-        const countryElem = label.nextElementSibling;
-        if (countryElem) {
-          return countryElem.textContent.trim();
-        }
-      }
-    }
-    // Alternative: Look for 'Country' or other variants
-    return null;
-  }
-
-  // Block channel if country matches
-  function blockChannelByCountry() {
-    const blockedCountries = getBlockedCountries();
-    if (!blockedCountries.length) return;
-    const country = extractChannelCountry();
-    if (country && blockedCountries.includes(country)) {
-      // Hide channel content or redirect
-      document.body.innerHTML = '<div style="padding:2em;text-align:center;font-size:2em;">Blocked by country: ' + country + '</div>';
-    }
+    let country = null;
+    const rows = document.querySelectorAll(
+      'ytd-about-channel-renderer #country, #additional-info-container tr');
+    rows.forEach((row) => {
+      const text = row.textContent.trim();
+      if (text) country = text;
+    });
+    port.postMessage({ type: 'channelCountry', data: { channelId, country } });
   }
 
   const utils = {
@@ -109,16 +94,15 @@
 
   connectToPort();
 
-    // Run country blocking on channel pages
-    if (window.location.pathname.startsWith('/channel/') || window.location.pathname.startsWith('/@')) {
-      // Wait for About tab to load
-      const tryBlock = () => {
-        blockChannelByCountry();
-      };
-      // Try immediately and after DOM changes
-      document.addEventListener('DOMContentLoaded', tryBlock);
-      setTimeout(tryBlock, 2000); // Fallback for SPA navigation
+  // Backfill the country cache on channel pages, and re-run on SPA nav.
+  function maybeHarvestCountry() {
+    const path = window.location.pathname;
+    if (path.startsWith('/channel/') || path.startsWith('/@') || path.startsWith('/c/')) {
+      setTimeout(harvestCountryFromDom, 1500);
     }
+  }
+  document.addEventListener('DOMContentLoaded', maybeHarvestCountry);
+  window.addEventListener('yt-navigate-finish', maybeHarvestCountry, true);
 
   // Listen for messages from injected page script
   window.addEventListener('message', (event) => {
@@ -130,8 +114,13 @@
         events.contextBlock(event.data.data);
         break;
       }
+      case 'channelCountry': {
+        port.postMessage({ type: 'channelCountry', data: event.data.data });
+        break;
+      }
       case 'ready': {
         utils.sendStorage();
+        break;
       }
       default:
         break;

@@ -1,6 +1,17 @@
 'use strict';
 
+// Load shared pure helpers. In the Chrome service worker importScripts()
+// resolves relative to this file (src/scripts/). Firefox loads it via the
+// manifest background.scripts array instead, so guard against double-load.
+if (typeof countryUtils === 'undefined' && typeof importScripts === 'function') {
+  importScripts('lib/country-utils.js');
+}
+
 const has = Object.prototype.hasOwnProperty;
+
+// Curated remote channel blocklist + harvested channelId->country cache.
+let remoteBlocklist = { channels: [], fetchedAt: 0 };
+let channelCountryMap = {};
 const unicodeBoundry = "[ \n\r\t!@#$%^&*()_\\-=+\\[\\]\\\\\\|;:'\",\\.\\/<>\\?`~:]+";
 const ports = {};
 let enabled = true;
@@ -65,6 +76,18 @@ const utils = {
     });
   },
 
+  // Channel IDs to block in addition to the user's own channelId filter:
+  // the curated remote blocklist + channels whose harvested country is in
+  // the user's country filter.
+  extraChannelIds(data) {
+    const ids = new Set(remoteBlocklist.channels || []);
+    const countryList = countryUtils.compileCountryList(
+      (data.filterData && data.filterData.country) || []);
+    countryUtils.blockedChannelIdsByCountry(channelCountryMap, countryList)
+      .forEach(id => ids.add(id));
+    return [...ids];
+  },
+
   compileAll(data) {
     const sendData = { filterData: {}, options: data.options };
 
@@ -78,6 +101,14 @@ const utils = {
 
     sendData.filterData.vidLength = data.filterData.vidLength;
     sendData.filterData.javascript = data.filterData.javascript;
+
+    // Append curated + country-derived channel IDs as exact-match regexes,
+    // reusing the existing channelId filter engine in inject.js.
+    const extraIds = this.extraChannelIds(data);
+    if (extraIds.length > 0) {
+      sendData.filterData.channelId = (sendData.filterData.channelId || [])
+        .concat(extraIds.map(id => [`^${id}$`, '']));
+    }
 
     return sendData;
   },
@@ -107,11 +138,18 @@ const utils = {
   }
 };
 
-chrome.storage.local.get(['storageData', 'enabled'], (data) => {
-  if (data !== undefined && Object.keys(data).length > 0) {
-    storage = data.storageData;
-    compiledStorage = utils.compileAll(data.storageData);
+chrome.storage.local.get(
+  ['storageData', 'enabled', 'remoteBlocklist', 'channelCountryMap'], (data) => {
+  if (Object.hasOwn(data, 'remoteBlocklist')) {
+    remoteBlocklist = data.remoteBlocklist;
   }
+  if (Object.hasOwn(data, 'channelCountryMap')) {
+    channelCountryMap = data.channelCountryMap;
+  }
+  if (data !== undefined && Object.keys(data).length > 0 && data.storageData) {
+    storage = data.storageData;
+  }
+  compiledStorage = utils.compileAll(storage);
   if (Object.hasOwn(data, 'enabled')) {
     enabled = data.enabled
   }

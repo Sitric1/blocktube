@@ -42,8 +42,11 @@
     "storage",
     "unlimitedStorage"
   ],
+  "host_permissions": [
+    "https://raw.githubusercontent.com/*"
+  ],
   "background": {
-    "scripts": ["src/scripts/background.js"]
+    "scripts": ["src/scripts/lib/country-utils.js", "src/scripts/background.js"]
   },
   "icons": {
     "16": "assets/icons/16.png",

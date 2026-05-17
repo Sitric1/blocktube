@@ -42,6 +42,9 @@
     "storage",
     "unlimitedStorage"
   ],
+  "host_permissions": [
+    "https://raw.githubusercontent.com/*"
+  ],
   "background": {
     "service_worker": "src/scripts/background.js"
   },

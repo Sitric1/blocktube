@@ -138,6 +138,31 @@ const utils = {
   }
 };
 
+const BLOCKLIST_URL =
+  'https://raw.githubusercontent.com/Sitric1/channel-blocklist/main/blocklist.txt';
+const BLOCKLIST_TTL = 24 * 60 * 60 * 1000; // re-fetch at most once per day
+
+// Fetch the curated channel blocklist, store it, recompile and rebroadcast.
+async function fetchRemoteBlocklist(force = false) {
+  const now = Date.now();
+  if (!force && remoteBlocklist.fetchedAt
+      && (now - remoteBlocklist.fetchedAt) < BLOCKLIST_TTL) {
+    return remoteBlocklist;
+  }
+  try {
+    const resp = await fetch(BLOCKLIST_URL, { cache: 'no-cache' });
+    if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
+    const channels = countryUtils.parseBlocklistText(await resp.text());
+    remoteBlocklist = { channels, fetchedAt: now };
+    await chrome.storage.local.set({ remoteBlocklist });
+    compiledStorage = utils.compileAll(storage);
+    utils.sendFiltersToAll();
+  } catch (e) {
+    console.error('BlockTube: remote blocklist fetch failed', e);
+  }
+  return remoteBlocklist;
+}
+
 chrome.storage.local.get(
   ['storageData', 'enabled', 'remoteBlocklist', 'channelCountryMap'], (data) => {
   if (Object.hasOwn(data, 'remoteBlocklist')) {
@@ -155,6 +180,7 @@ chrome.storage.local.get(
   }
   initStorage = true;
   utils.sendFiltersToAll();
+  fetchRemoteBlocklist();
 
   chrome.runtime.onConnect.addListener((port) => {
     port.onDisconnect.addListener((port) => {
@@ -193,4 +219,23 @@ chrome.runtime.onInstalled.addListener((details) => {
   if (details.reason === chrome.runtime.OnInstalledReason.UPDATE) {
     utils.sendReloadToAll();
   }
-})
+});
+
+// Messages from the options page (not a content script, so not a port).
+chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
+  if (!msg || !msg.type) return false;
+  if (msg.type === 'updateBlocklist') {
+    fetchRemoteBlocklist(true).then((rb) => sendResponse({
+      channels: rb.channels.length, fetchedAt: rb.fetchedAt,
+    }));
+    return true; // async sendResponse
+  }
+  if (msg.type === 'getBlocklistInfo') {
+    sendResponse({
+      channels: remoteBlocklist.channels.length,
+      fetchedAt: remoteBlocklist.fetchedAt,
+    });
+    return false;
+  }
+  return false;
+});

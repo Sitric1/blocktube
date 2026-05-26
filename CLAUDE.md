@@ -104,6 +104,48 @@ Firefox uses `background.scripts` plus `browser_specific_settings.gecko`. Keep b
 changing permissions, content scripts, or metadata. `firefox_selfhosted` is a third manifest
 variant for the self-distributed `.xpi`.
 
+## Country & Curated-Channel Blocking
+
+Country-based blocking is implemented as channel-ID blocking — `background.js` computes extra
+blocked channel IDs and appends them as `^id$` regex entries to
+`compiledStorage.filterData.channelId`. The existing channelId engine in `inject.js` handles
+filtering everywhere (feeds, search, sidebar, and channel-page redirect).
+
+### Storage keys (separate from `storageData`)
+
+- **`remoteBlocklist`** — raw text from
+  `https://raw.githubusercontent.com/Sitric1/channel-blocklist/main/blocklist.txt`;
+  parsed by `country-utils.js`. Cached with a 24h TTL; refreshed on startup and via the
+  "Update curated blocklist" button in Options.
+- **`channelCountryMap`** — `{ channelId: countryName | null }`. `null` means "checked, no
+  location set." Never downgrades a known country to `null`.
+
+### Key files
+
+- **`src/scripts/lib/country-utils.js`** — pure helpers: `parseBlocklistText`,
+  `compileCountryList`, `blockedChannelIdsByCountry`, `CHANNEL_ID_RE`. Loaded via
+  `importScripts()` in Chrome background; prepended to `background.scripts` in Firefox manifests.
+- **`background.js` `extraChannelIds()`** — merges curated list + country-matched channels into
+  extra `^id$` regex entries appended in `compileAll`.
+- **`background.js` `fetchRemoteBlocklist()`** — fetches and caches the curated list (24h TTL).
+- **`background.js` `recordChannelCountry()`** — stores harvested country; recompiles + broadcasts.
+- **`inject.js` `harvestChannelCountry()`** — extracts `country` from
+  `aboutChannelViewModel` / `channelAboutFullMetadataRenderer` in intercepted `/youtubei/v1/browse`
+  JSON; posts `channelCountry` message to content script.
+- **`content_script.js` `harvestCountryFromDom()`** — DOM-scrape fallback on channel About pages;
+  `maybeHarvestCountry()` fires on `DOMContentLoaded` + `yt-navigate-finish`.
+
+### Country name format
+
+Stored as YouTube's "Location" display string (e.g. `Israel`, `United States`), matched
+case-insensitively. No alias table — if YouTube's UI language changes the name, users must update.
+
+### Firefox manifest note
+
+Both `platform/firefox/manifest.json` and `platform/firefox_selfhosted/manifest.json` must list
+`country-utils.js` before `background.js` in `background.scripts` — the Firefox background has no
+`importScripts`, so load order is the only way to make `countryUtils` available.
+
 ## Conventions
 
 ESLint extends `airbnb-base` with `max-len` 100; `'use strict'` required at global scope.

@@ -1,6 +1,17 @@
 'use strict';
 
+// Load shared pure helpers. In the Chrome service worker importScripts()
+// resolves relative to this file (src/scripts/). Firefox loads it via the
+// manifest background.scripts array instead, so guard against double-load.
+if (typeof countryUtils === 'undefined' && typeof importScripts === 'function') {
+  importScripts('lib/country-utils.js');
+}
+
 const has = Object.prototype.hasOwnProperty;
+
+// Curated remote channel blocklist + harvested channelId->country cache.
+let remoteBlocklist = { channels: [], fetchedAt: 0 };
+let channelCountryMap = {};
 const unicodeBoundry = "[ \n\r\t!@#$%^&*()_\\-=+\\[\\]\\\\\\|;:'\",\\.\\/<>\\?`~:]+";
 const ports = {};
 let enabled = true;
@@ -13,6 +24,7 @@ let storage = {
     channelName: [],
     comment: [],
     title: [],
+    country: [],
     vidLength: [null, null],
     javascript: "",
     percentWatchedHide: null
@@ -65,6 +77,18 @@ const utils = {
     });
   },
 
+  // Channel IDs to block in addition to the user's own channelId filter:
+  // the curated remote blocklist + channels whose harvested country is in
+  // the user's country filter.
+  extraChannelIds(data) {
+    const ids = new Set(remoteBlocklist.channels || []);
+    const countryList = countryUtils.compileCountryList(
+      (data.filterData && data.filterData.country) || []);
+    countryUtils.blockedChannelIdsByCountry(channelCountryMap, countryList)
+      .forEach(id => ids.add(id));
+    return [...ids];
+  },
+
   compileAll(data) {
     const sendData = { filterData: {}, options: data.options };
 
@@ -78,6 +102,14 @@ const utils = {
 
     sendData.filterData.vidLength = data.filterData.vidLength;
     sendData.filterData.javascript = data.filterData.javascript;
+
+    // Append curated + country-derived channel IDs as exact-match regexes,
+    // reusing the existing channelId filter engine in inject.js.
+    const extraIds = this.extraChannelIds(data);
+    if (extraIds.length > 0) {
+      sendData.filterData.channelId = (sendData.filterData.channelId || [])
+        .concat(extraIds.map(id => [`^${id}$`, '']));
+    }
 
     return sendData;
   },
@@ -107,16 +139,65 @@ const utils = {
   }
 };
 
-chrome.storage.local.get(['storageData', 'enabled'], (data) => {
-  if (data !== undefined && Object.keys(data).length > 0) {
-    storage = data.storageData;
-    compiledStorage = utils.compileAll(data.storageData);
+const BLOCKLIST_URL =
+  'https://raw.githubusercontent.com/Sitric1/channel-blocklist/main/blocklist.txt';
+const BLOCKLIST_TTL = 24 * 60 * 60 * 1000; // re-fetch at most once per day
+
+// Fetch the curated channel blocklist, store it, recompile and rebroadcast.
+async function fetchRemoteBlocklist(force = false) {
+  const now = Date.now();
+  if (!force && remoteBlocklist.fetchedAt
+      && (now - remoteBlocklist.fetchedAt) < BLOCKLIST_TTL) {
+    return remoteBlocklist;
   }
+  try {
+    const resp = await fetch(BLOCKLIST_URL, { cache: 'no-cache' });
+    if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
+    const channels = countryUtils.parseBlocklistText(await resp.text());
+    remoteBlocklist = { channels, fetchedAt: now };
+    await chrome.storage.local.set({ remoteBlocklist });
+    compiledStorage = utils.compileAll(storage);
+    utils.sendFiltersToAll();
+  } catch (e) {
+    console.error('BlockTube: remote blocklist fetch failed', e);
+  }
+  return remoteBlocklist;
+}
+
+// Record a harvested channelId->country pair into the persistent cache.
+// `data.country` is a country name string, or null meaning "checked, no
+// location" (so we stop re-harvesting that channel).
+function recordChannelCountry(data) {
+  if (!data || !data.channelId) return;
+  const prev = channelCountryMap[data.channelId];
+  const next = data.country || null;
+  // Never downgrade a known country back to null.
+  if (prev != null && next === null) return;
+  if (prev === next) return; // no change -> no recompile
+  channelCountryMap[data.channelId] = next;
+  chrome.storage.local.set({ channelCountryMap });
+  compiledStorage = utils.compileAll(storage);
+  utils.sendFiltersToAll();
+}
+
+chrome.storage.local.get(
+  ['storageData', 'enabled', 'remoteBlocklist', 'channelCountryMap'], (data) => {
+  if (Object.hasOwn(data, 'remoteBlocklist')) {
+    remoteBlocklist = data.remoteBlocklist;
+  }
+  if (Object.hasOwn(data, 'channelCountryMap')) {
+    channelCountryMap = data.channelCountryMap;
+  }
+  if (data !== undefined && Object.keys(data).length > 0 && data.storageData) {
+    storage = data.storageData;
+  }
+  compiledStorage = utils.compileAll(storage);
   if (Object.hasOwn(data, 'enabled')) {
     enabled = data.enabled
   }
   initStorage = true;
   utils.sendFiltersToAll();
+  fetchRemoteBlocklist();
 
   chrome.runtime.onConnect.addListener((port) => {
     port.onDisconnect.addListener((port) => {
@@ -130,6 +211,10 @@ chrome.storage.local.get(['storageData', 'enabled'], (data) => {
         case 'contextBlock': {
           storage.filterData[msg.data.type].push(...msg.data.entries);
           chrome.storage.local.set({storageData: storage});
+          break;
+        }
+        case 'channelCountry': {
+          recordChannelCountry(msg.data);
           break;
         }
       }
@@ -155,4 +240,23 @@ chrome.runtime.onInstalled.addListener((details) => {
   if (details.reason === chrome.runtime.OnInstalledReason.UPDATE) {
     utils.sendReloadToAll();
   }
-})
+});
+
+// Messages from the options page (not a content script, so not a port).
+chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
+  if (!msg || !msg.type) return false;
+  if (msg.type === 'updateBlocklist') {
+    fetchRemoteBlocklist(true).then((rb) => sendResponse({
+      channels: rb.channels.length, fetchedAt: rb.fetchedAt,
+    }));
+    return true; // async sendResponse
+  }
+  if (msg.type === 'getBlocklistInfo') {
+    sendResponse({
+      channels: remoteBlocklist.channels.length,
+      fetchedAt: remoteBlocklist.fetchedAt,
+    });
+    return false;
+  }
+  return false;
+});

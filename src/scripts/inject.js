@@ -944,6 +944,51 @@
     window.postMessage({ from: 'BLOCKTUBE_PAGE', type, data }, document.location.origin);
   }
 
+  // Remember the channel ID of the most recent channel browse response so a
+  // later About continuation (which omits it) can be paired with it.
+  let lastChannelBrowseId;
+
+  // Depth-limited recursive search for the first object carrying `key`.
+  function deepFindKey(obj, key, depth = 0) {
+    if (depth > 12 || obj === null || typeof obj !== 'object') return undefined;
+    if (has.call(obj, key)) return obj[key];
+    const keys = Object.keys(obj);
+    for (let i = 0; i < keys.length; i += 1) {
+      const found = deepFindKey(obj[keys[i]], key, depth + 1);
+      if (found !== undefined) return found;
+    }
+    return undefined;
+  }
+
+  // Pull (channelId, country) out of an intercepted browse response and
+  // report it to the background cache via the content script.
+  // Only reports when channel About metadata is actually present, so a plain
+  // Videos-tab browse never produces a misleading "no location" record.
+  function harvestChannelCountry(resp) {
+    try {
+      const externalId = getObjectByPath(resp, 'metadata.channelMetadataRenderer.externalId');
+      if (externalId) lastChannelBrowseId = externalId;
+
+      // Modern About panel.
+      const aboutVM = deepFindKey(resp, 'aboutChannelViewModel');
+      // Legacy About metadata renderer.
+      const aboutLegacy = deepFindKey(resp, 'channelAboutFullMetadataRenderer');
+      if (aboutVM === undefined && aboutLegacy === undefined) return;
+
+      let country;
+      if (aboutVM && typeof aboutVM.country === 'string') {
+        country = aboutVM.country.trim();
+      } else if (aboutLegacy) {
+        country = getObjectByPath(aboutLegacy, 'country.simpleText');
+        if (typeof country === 'string') country = country.trim();
+      }
+
+      const channelId = externalId || lastChannelBrowseId;
+      if (!channelId) return;
+      postMessage('channelCountry', { channelId, country: country || null });
+    } catch (e) { /* harvesting is best-effort */ }
+  }
+
   function getObjectByPath(obj, path, def = undefined) {
     const paths = (path instanceof Array) ? path : path.split('.');
     let nextObj = obj;
@@ -1087,6 +1132,7 @@
 
     if (['/youtubei/v1/search', '/youtubei/v1/browse'].includes(url.pathname)) {
       ObjectFilter(resp, filterRules.main, [], true);
+      if (url.pathname === '/youtubei/v1/browse') harvestChannelCountry(resp);
     }
     else if (url.pathname === '/youtubei/v1/get_watch') {
       if (!(resp instanceof Array)) return;
@@ -1150,6 +1196,7 @@
             rules = filterRules.main;
         }
         ObjectFilter(obj.response || obj.data, rules, postActions, true);
+        harvestChannelCountry(obj.response || obj.data);
       }
     });
   }
@@ -1744,9 +1791,11 @@
     const postActions = [fixAutoplay];
     if (typeof window.ytInitialData === 'object' && window.ytInitialData !== null) {
       ObjectFilter(window.ytInitialData, mergedFilterRules, (window.ytInitialData.contents && currentBlock) ? postActions.concat(redirectToNext) : postActions, true);
+      harvestChannelCountry(window.ytInitialData);
     } else {
       defineProperty('ytInitialData', undefined, (v) => {
-        ObjectFilter(v, mergedFilterRules, (v.contents && currentBlock) ? postActions.concat(redirectToNext) : postActions, true)
+        ObjectFilter(v, mergedFilterRules, (v.contents && currentBlock) ? postActions.concat(redirectToNext) : postActions, true);
+        harvestChannelCountry(v);
       });
     }
 
